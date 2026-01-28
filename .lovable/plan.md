@@ -1,109 +1,48 @@
 
-# Plano: Corrigir Redirecionamento Após Criação do Primeiro Condomínio
+# Plano: Corrigir Erro de CORS na Edge Function create-user
 
 ## Problema Identificado
 
-O hook `useFirstCondominiumCheck` utiliza **estado local isolado** (`useState`) em cada componente que o chama. Isso significa que:
+A edge function `create-user` não estava respondendo porque:
+1. **Edge function não estava deployada** - Já resolvido durante a investigação
+2. **Headers CORS incompletos** - Os headers de CORS não incluem todos os headers que o cliente Supabase JS envia
 
-1. Quando `FirstCondominiumSetup` define `setNeedsFirstCondominium(false)`, apenas sua instância local é atualizada
-2. Ao navegar para `/dashboard`, o `ProtectedRoute` cria uma **nova instância** do hook
-3. Essa nova instância faz uma query ao banco e, devido a timing/race conditions, pode ainda avaliar que precisa do primeiro condomínio e redirecionar de volta
+O erro "Failed to send a request to the Edge Function" ocorre porque o navegador bloqueia requisições quando o servidor não aceita todos os headers que estão sendo enviados (preflight CORS falha).
 
-## Solucao Proposta
+## Solução
 
-Converter o hook `useFirstCondominiumCheck` em um **Context Provider** compartilhado, garantindo que todas as partes da aplicacao usem a mesma instancia do estado.
+Atualizar os headers CORS em todas as edge functions para incluir os headers extras do Supabase client:
 
----
+```javascript
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
+};
+```
 
 ## Arquivos a Modificar
 
-### 1. Criar Contexto Compartilhado
+1. **supabase/functions/create-user/index.ts** (linha 14)
+   - Atualizar `Access-Control-Allow-Headers` para incluir os headers extras
 
-**Arquivo**: `src/contexts/FirstCondominiumContext.tsx` (novo)
+2. **Outras edge functions afetadas** (para consistência):
+   - `delete-user/index.ts`
+   - `update-user/index.ts`  
+   - `list-users/index.ts`
+   - Outras que usam o mesmo padrão
 
-- Criar um `FirstCondominiumProvider` que encapsula toda a logica atual do hook
-- Prover estado compartilhado para `needsFirstCondominium`, `loading`, `organizationId`, `organizationName`
-- Expor funcoes `refetch` e `setNeedsFirstCondominium` para atualizacao global
+## Resultado Esperado
 
-### 2. Atualizar App.tsx
-
-**Arquivo**: `src/App.tsx`
-
-- Adicionar `FirstCondominiumProvider` na hierarquia de providers (apos `UserRoleProvider`)
-- Garantir que o contexto esteja disponivel para todos os componentes protegidos
-
-### 3. Atualizar Hook para Consumir Contexto
-
-**Arquivo**: `src/hooks/useFirstCondominiumCheck.tsx`
-
-- Transformar o hook para simplesmente consumir o contexto
-- Manter a mesma interface de retorno para nao quebrar codigo existente
-
-### 4. Atualizar ProtectedRoute
-
-**Arquivo**: `src/components/ProtectedRoute.tsx`
-
-- Nenhuma mudanca necessaria na interface, pois o hook mantera a mesma assinatura
-
-### 5. Atualizar FirstCondominiumSetup
-
-**Arquivo**: `src/pages/FirstCondominiumSetup.tsx`
-
-- Nenhuma mudanca necessaria na interface, o `setNeedsFirstCondominium` agora atualizara o estado global
+Após a correção, o cadastro de usuários funcionará normalmente sem o erro "Failed to send a request to the Edge Function".
 
 ---
 
-## Detalhes Tecnicos
+## Detalhes Técnicos
 
-### Nova Estrutura do Contexto
+O cliente Supabase JS versão 2.81.1 envia os seguintes headers extras nas requisições:
+- `x-supabase-client-platform`
+- `x-supabase-client-platform-version`
+- `x-supabase-client-runtime`
+- `x-supabase-client-runtime-version`
 
-```text
-FirstCondominiumProvider
-    |
-    +-- Estado Global
-    |      needsFirstCondominium: boolean
-    |      loading: boolean
-    |      organizationId: string | null
-    |      organizationName: string | null
-    |
-    +-- Metodos
-           setNeedsFirstCondominium(value: boolean)
-           refetch()
-```
-
-### Fluxo Corrigido
-
-```text
-FirstCondominiumSetup             ProtectedRoute (/dashboard)
-        |                                    |
-   criar condo                               |
-        |                                    |
-   setNeedsFirstCondominium(false) ---------> Estado Global Atualizado
-        |                                    |
-   navigate("/dashboard")                    |
-        |                                    |
-        |                           useFirstCondominiumCheck() 
-        |                                    | (le do contexto global)
-        |                                    |
-        |                           needsFirstCondominium = false (correto!)
-        |                                    |
-        |                           renderiza Dashboard normalmente
-```
-
----
-
-## Ordem de Implementacao
-
-1. Criar `FirstCondominiumContext.tsx` com toda a logica
-2. Atualizar `App.tsx` para incluir o provider
-3. Simplificar `useFirstCondominiumCheck.tsx` para consumir o contexto
-4. Testar o fluxo completo de criacao do primeiro condominio
-
----
-
-## Beneficios
-
-- Estado compartilhado entre todos os componentes
-- Eliminacao de race conditions no redirecionamento
-- Codigo mais limpo e manutenivel
-- Reutilizacao consistente em toda a aplicacao
+Quando o servidor não lista esses headers no `Access-Control-Allow-Headers`, o navegador bloqueia a requisição real após o preflight OPTIONS falhar.
